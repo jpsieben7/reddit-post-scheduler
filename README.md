@@ -96,7 +96,7 @@ The following properties are also optional, but take booleans, not strings. Thes
 
 # Setting this up with pythonanywhere
 
-If you do not have a server, this can e set up for free on pythonanwhere. It meets their daily limits. 
+If you do not have a server, this can be set up for free on pythonanwhere. It meets their daily limits. 
 
 - Make an account at https://www.pythonanywhere.com
 - Naigate to the "Files" page 
