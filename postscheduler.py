@@ -38,7 +38,7 @@ def submitPost(sub, title, text, link, image, video, parent, flairid, flairtext,
 				else:
 					submission = reddit.subreddit(sub).submit_video(title, video_path=video, thumbnail_path=image, flair_id=flairid, flair_text=flairtext, send_replies=not(dontnotify), nsfw=nsfw, spoiler=spoiler, collection_id=collectionid)
 					
-			f.write("\n\nPosted --  "+ tolink(submission.url))
+			f.write("\n\nPosted --  "+ tolink(submission.permalink))
 			
 		except APIException as e:
 			if e.field=="ratelimit":
