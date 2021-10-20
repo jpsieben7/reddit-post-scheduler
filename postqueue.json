@@ -1,0 +1,18 @@
+{
+  "posts": [
+    {
+      "sub": "subreddit_name",
+      "title": "title_text",
+      "link": "link_url",
+      "comment_text": "comment_text",
+      "date": "8,18"
+    },
+    {
+      "sub": "subreddit_name",
+      "title": "title_text",
+      "image": "path/to/image",
+      "comment_text": "comment_text",
+      "date": "7,20"
+    }
+  ]
+}

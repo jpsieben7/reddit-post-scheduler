@@ -1,122 +1,224 @@
 #!/usr/bin/python3
 # post flair comment sticky
-
-import praw
 import datetime
 import time
+
+import praw
 from praw.exceptions import APIException
+from praw.models.reddit.mixins import ReplyableMixin
+from praw.reddit import Submission, Comment
 
-f= open("postscheduler.log","a+")
+import postqueuemanager
+from postpayload import PostPayload
+from postqueuemanager import PostQueueManager
 
-#Credentials
-reddit = praw.Reddit(
-	client_id='',
-	client_secret='',
-	password='',
-	user_agent='postscheduler v.2b by /u/ibid-11962',
-	username=''
-)
+# Credentials
+reddit = praw.Reddit(**postqueuemanager.read_json_from_file("credentials.json"))
+
+# Set to true to prevent the script from posting/commenting, but do everything else
+DEBUG = False
+f = open("postscheduler.log", "a+")
 
 
-from postqueue import posts
+def log(msg):
+    print(msg)
+    f.write(msg)
+
+
 ###############################################################################
 ###############################################################################
 ###############################################################################
 
-def submitPost(sub, title, text, link, image, video, parent, flairid, flairtext, collectionid, sort, commenttext, date, spoiler, nsfw, lock, contest, dontnotify, distinguish, sticky, lockcomment, distinguishcomment, stickycomment, wait):
-	currentDate = str(datetime.datetime.now().month) + "," + str(datetime.datetime.now().day)
-	if date != currentDate:
-		f.write("\n\ntoday is "+ currentDate+ "  --  post is scheduled for "+date)
-		return 1
-	if parent == None:
-		try:
-			if image == None and video == None:
-				submission = reddit.subreddit(sub).submit(title, selftext=text, url=link, flair_id=flairid, flair_text=flairtext, send_replies=not(dontnotify), nsfw=nsfw, spoiler=spoiler, collection_id=collectionid)	
-			else:
-				if video == None:
-					submission = reddit.subreddit(sub).submit_image(title, image_path=image, flair_id=flairid, flair_text=flairtext, send_replies=not(dontnotify), nsfw=nsfw, spoiler=spoiler, collection_id=collectionid)
-				else:
-					submission = reddit.subreddit(sub).submit_video(title, video_path=video, thumbnail_path=image, flair_id=flairid, flair_text=flairtext, send_replies=not(dontnotify), nsfw=nsfw, spoiler=spoiler, collection_id=collectionid)
-					
-			f.write("\n\nPosted --  "+ tolink(submission.permalink))
-			
-		except APIException as e:
-			if e.field=="ratelimit":
-				if wait==True:
-					msg = e.message.lower()
-					index=msg.find("minute")
-					minutes = int(msg[index - 2]) + 1 if index != -1 else 1
-					f.write("\n\nRatelimit reached. Waiting "+str(minutes)+" minutes before retrying.")
-					time.sleep(minutes*60)
-					return 5
-				else:
-					f.write("\n\nError posting submission -- "+str(e))
-		except Exception as e:
-			f.write("\n\nError posting submission -- "+str(e))
-		try:
-			if distinguish:
-				submission.mod.distinguish()
-				f.write("\nDistinguished")
-			if sticky:
-				submission.mod.sticky()
-				f.write("\nStickied")
-			if lock:
-				submission.mod.lock()
-				f.write("\nLocked")
-			if contest:
-				submission.mod.contest_mode()
-				f.write("\nEnabled Contest Mode")
-			if sort != None:
-				submission.mod.suggested_sort(sort)
-				f.write("\nSet suggested sort to "+sort)
-		except Exception as e:
-			f.write("\n\nError attributing submission. (Are you a moderator?) -- "+str(e))
-	else:
-		submission = reddit.comment(parent)
-		try:
-			submission.body
-		except Exception as e:
-			submission = reddit.submission(parent)
-			
-	if commenttext == None:
-		return 2
-		
-	try:
-		comment = submission.reply(commenttext)
-		f.write("\n\tCommented --  "+ tolink(comment.permalink))
-	except Exception as e:
-		f.write("\n\tError posting comment -- "+str(e))
-	try:
-		if stickycomment:
-			comment.mod.distinguish(how='yes', sticky=True)
-			f.write("\n\tDistinguished and Stickied")
-		elif distinguishcomment:
-			comment.mod.distinguish(how='yes')
-			f.write("\n\tDistinguished")
-		if lockcomment:
-			comment.mod.lock()
-			f.write("\n\tLocked")
-	except Exception as e:
-		f.write("\n\tError attributing comment. (Are you a moderator?) -- "+str(e))
-	return 0
+class RateLimitException(Exception):
+    minutes_to_wait: int
 
-def isdate(futureTime):
-	currentTime = str(datetime.datetime.now().month) + "," + str(datetime.datetime.now().day)
-	return futureTime == currentTime
+    def __init__(self, minutes_to_wait):
+        self.minutes_to_wait = minutes_to_wait
 
-def tolink(permalink):
-	return "https://reddit.com" + permalink
 
-#Main
+def get_current_day_month_string() -> str:
+    return str(datetime.datetime.now().month) + "," + str(datetime.datetime.now().day)
+
+
+def write_error_posting_to_log(e: Exception):
+    log("\n\nError posting submission -- " + str(e))
+
+
+def add_attributes_to_post(submission: Submission, pp: PostPayload):
+    try:
+        if pp.distinguish:
+            submission.mod.distinguish()
+            log("\nDistinguished")
+        if pp.sticky:
+            submission.mod.sticky()
+            log("\nStickied")
+        if pp.lock:
+            submission.mod.lock()
+            log("\nLocked")
+        if pp.contest:
+            submission.mod.contest_mode()
+            log("\nEnabled Contest Mode")
+        if pp.sort is not None:
+            submission.mod.suggested_sort(pp.sort)
+            log("\nSet suggested sort to " + pp.sort)
+    except Exception as e:
+        log("\n\nError attributing submission. (Are you a moderator?) -- " + str(e))
+
+
+def submit_post(pp: PostPayload) -> Submission:
+    submission = None
+    try:
+        if pp.image is None and pp.video is None:
+            submission = reddit.subreddit(pp.sub).submit(pp.title, selftext=pp.text, url=pp.link,
+                                                         flair_id=pp.flair_id,
+                                                         flair_text=pp.flair_text, send_replies=not pp.dont_notify,
+                                                         nsfw=pp.nsfw, spoiler=pp.spoiler,
+                                                         collection_id=pp.collection_id)
+        else:
+            if pp.video is None:
+                submission = reddit.subreddit(pp.sub).submit_image(pp.title, image_path=pp.image,
+                                                                   flair_id=pp.flair_id,
+                                                                   flair_text=pp.flair_text,
+                                                                   send_replies=not pp.dont_notify,
+                                                                   nsfw=pp.nsfw, spoiler=pp.spoiler,
+                                                                   collection_id=pp.collection_id)
+            else:
+                submission = reddit.subreddit(pp.sub).submit_video(pp.title, video_path=pp.video,
+                                                                   thumbnail_path=pp.image,
+                                                                   flair_id=pp.flair_id, flair_text=pp.flair_text,
+                                                                   send_replies=not pp.dont_notify, nsfw=pp.nsfw,
+                                                                   spoiler=pp.spoiler,
+                                                                   collection_id=pp.collection_id)
+
+        log("\n\nPosted --  " + to_link(submission.permalink))
+    except APIException as e:
+        if e.field == "ratelimit":
+            if pp.wait:
+                msg = e.message.lower()
+                index = msg.find("minute")
+                minutes = int(msg[index - 2]) + 1 if index != -1 else 1
+                log("\n\nRate limit reached. Need to wait " + str(minutes) + " minutes before retrying.")
+                raise RateLimitException(minutes)
+            else:
+                write_error_posting_to_log(e)
+                raise e
+    except Exception as e:
+        log("\n\nError posting submission -- " + str(e))
+        raise e
+
+    return submission
+
+
+def get_comment_or_parent_as_replyable(pp: PostPayload) -> ReplyableMixin:
+    submission = reddit.comment(id=pp.parent)
+    try:
+        submission.body
+    except Exception as e:
+        submission = reddit.submission(id=pp.parent)
+    return submission
+
+
+def reply_to_comment_or_submission(comment_or_submission, pp: PostPayload):
+    try:
+        comment = comment_or_submission.reply(pp.comment_text)
+        log("\n\tCommented --  " + to_link(comment.permalink))
+    except Exception as e:
+        log("\n\tError posting comment -- " + str(e))
+        raise e
+
+
+def add_attributes_to_comment(comment: Comment, pp: PostPayload):
+    try:
+        if pp.sticky_comment:
+            comment.mod.distinguish(how='yes', sticky=True)
+            log("\n\tDistinguished and Stickied")
+        elif pp.distinguish_comment:
+            comment.mod.distinguish(how='yes')
+            log("\n\tDistinguished")
+        if pp.lock_comment:
+            comment.mod.lock()
+            log("\n\tLocked")
+    except Exception as e:
+        log("\n\tError attributing comment. (Are you a moderator?) -- " + str(e))
+    return
+
+
+def submit_post_payload(pp: PostPayload):
+    replyable: ReplyableMixin
+
+    if DEBUG:
+        print("DEBUG: Skipping submission steps")
+        return
+
+    if pp.parent is None:
+        submission = submit_post(pp)
+        add_attributes_to_post(submission, pp)
+        replyable = submission
+    else:
+        replyable = get_comment_or_parent_as_replyable(pp)
+
+    if pp.comment_text is None:
+        return
+
+    comment = reply_to_comment_or_submission(replyable, pp)
+    add_attributes_to_comment(comment, pp)
+
+
+def is_date(target_time):
+    current_time = get_current_day_month_string()
+    return target_time == current_time
+
+
+def to_link(permalink):
+    return "https://reddit.com" + permalink
+
+
+def post_posts_in_queue():
+    log(f"\n---------------------\nStarted. Current date string: {get_current_day_month_string()}\n")
+
+    post_queue_manager = PostQueueManager()
+    posts = post_queue_manager.posts
+
+    if DEBUG:
+        print(f"DEBUG: Posts size: {len(posts)}")
+        print(f"DEBUG: Current posts: {post_queue_manager.get_posts_as_pretty_printed_json()}")
+
+    for post in posts:
+        payload = PostPayload.from_overrides(post)
+
+        current_date = get_current_day_month_string()
+
+        if payload.date != current_date:
+            msg = f"\nToday is {current_date} --  post is scheduled for {payload.date}\n"
+            log(msg)
+            continue
+
+        if payload.link is not None:
+            payload.text = None
+
+        try:
+            submit_post_payload(payload)
+        except RateLimitException as e:
+            time.sleep(e.minutes_to_wait * 60)
+            try:
+                submit_post_payload(payload)
+            except Exception as e:
+                write_error_posting_to_log(e)
+                continue
+
+        log(f"\nSubmitted post: {payload}\n")
+        log(f"\nRemoving post from queue: {post}\n")
+        post_queue_manager.remove_post(post)
+
+    if not DEBUG:
+        post_queue_manager.write_posts_to_file()
+    else:
+        print(f"DEBUG: Would have written to file:\n{post_queue_manager.get_posts_as_pretty_printed_json()}\n")
+
+    log("\n\nFinished\n---------------------\n")
+    f.close()
+
+
+# Main
 if __name__ == "__main__":
-	f.write("\n---------------------\nStarted")
-	for post in posts:	
-		postspecs = {"sub": "test", "title": "test", "text": "", "link": None, "image": None, "video": None, "parent": None, "flairid": None, "flairtext": None, "collectionid": None, "sort": None, "commenttext": None, "date": "7,23", "spoiler": False, "nsfw": False, "lock": False, "contest": False, "dontnotify": False, "distinguish": False, "sticky": False, "lockcomment": False, "distinguishcomment": False, "stickycomment": False, "wait": False}
-		postspecs.update(post)
-		if postspecs["link"] != None:
-			postspecs["text"] = None
-		err = submitPost(sub=postspecs["sub"], title=postspecs["title"], text=postspecs["text"], link=postspecs["link"], image=postspecs["image"], video=postspecs["video"], parent=postspecs["parent"], flairid=postspecs["flairid"], flairtext=postspecs["flairtext"], collectionid=postspecs["collectionid"], sort=postspecs["sort"], commenttext=postspecs["commenttext"], date=postspecs["date"], spoiler=postspecs["spoiler"], nsfw=postspecs["nsfw"], lock=postspecs["lock"], contest=postspecs["contest"], dontnotify=postspecs["dontnotify"], distinguish=postspecs["distinguish"], sticky=postspecs["sticky"], lockcomment=postspecs["lockcomment"], distinguishcomment=postspecs["distinguishcomment"], stickycomment=postspecs["stickycomment"], wait=postspecs["wait"])
-		if err == 5:
-			submitPost(sub=postspecs["sub"], title=postspecs["title"], text=postspecs["text"], link=postspecs["link"], image=postspecs["image"], video=postspecs["video"], parent=postspecs["parent"], flairid=postspecs["flairid"], flairtext=postspecs["flairtext"], collectionid=postspecs["collectionid"], sort=postspecs["sort"], commenttext=postspecs["commenttext"], date=postspecs["date"], spoiler=postspecs["spoiler"], nsfw=postspecs["nsfw"], lock=postspecs["lock"], contest=postspecs["contest"], dontnotify=postspecs["dontnotify"], distinguish=postspecs["distinguish"], sticky=postspecs["sticky"], lockcomment=postspecs["lockcomment"], distinguishcomment=postspecs["distinguishcomment"], stickycomment=postspecs["stickycomment"], wait=postspecs["wait"])
-	f.write("\n\nFinished\n---------------------\n")
-	f.close()
+    post_posts_in_queue()
